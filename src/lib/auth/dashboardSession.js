@@ -38,6 +38,14 @@ export async function createDashboardAuthToken(claims = {}) {
     .sign(SECRET);
 }
 
+export async function createUserSessionToken(user) {
+  return createDashboardAuthToken({
+    userId: user.id,
+    username: user.username,
+    role: user.role,
+  });
+}
+
 export async function verifyDashboardAuthToken(token) {
   if (!token) return false;
   try {
@@ -60,6 +68,17 @@ export async function getDashboardAuthSession(token) {
 
 export async function setDashboardAuthCookie(cookieStore, request, claims = {}) {
   const token = await createDashboardAuthToken(claims);
+  cookieStore.set("auth_token", token, {
+    httpOnly: true,
+    secure: shouldUseSecureCookie(request),
+    sameSite: "lax",
+    path: "/",
+    maxAge: SESSION_MAX_AGE_SEC,
+  });
+}
+
+export async function setUserSessionCookie(cookieStore, request, user) {
+  const token = await createUserSessionToken(user);
   cookieStore.set("auth_token", token, {
     httpOnly: true,
     secure: shouldUseSecureCookie(request),

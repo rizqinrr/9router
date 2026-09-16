@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { getSettings } from "@/lib/localDb";
+import { verifyUserPin, getUserByUsername } from "@/lib/db/repos/usersRepo";
 import bcrypt from "bcryptjs";
 import { cookies } from "next/headers";
-import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
+import { setUserSessionCookie } from "@/lib/auth/dashboardSession";
 import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
@@ -29,16 +30,13 @@ export async function POST(request) {
       );
     }
 
-    const { password } = await request.json();
+    const { username, pin } = await request.json();
     const settings = await getSettings();
 
     // Block login via tunnel/tailscale if dashboard access is disabled
     if (isTunnelRequest(request, settings) && settings.tunnelDashboardAccess !== true) {
       return NextResponse.json({ error: "Dashboard access via tunnel is disabled" }, { status: 403 });
     }
-
-    // Default password is '123456' if not set
-    const storedHash = settings.password;
 
     if (settings.authMode === "sso" || settings.authMode === "saml" || settings.authMode === "oidc") {
       const ssoType = settings.ssoType || (settings.authMode === "saml" ? "saml" : "oidc");
@@ -50,47 +48,37 @@ export async function POST(request) {
       }
     }
 
-    let isValid = false;
-    if (storedHash) {
-      isValid = await bcrypt.compare(password, storedHash);
-    } else {
-      // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
-      isValid = password === initialPassword;
-    }
+    // Multi-user login: username + PIN
+    const user = await verifyUserPin(username, pin);
 
-    if (isValid) {
-      recordSuccess(ip);
-
-      // Default password still in use on a remote client → force a password
-      // change before the dashboard is exposed remotely (keeps local UX intact).
-      const mustChangePassword =
-        !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
-
-      if (mustChangePassword) {
-        // Do NOT issue a session token: a fresh install's default password is
-        // public knowledge ("123456"), so handing out a valid JWT would let any
-        // remote attacker authenticate and (e.g.) PATCH /api/settings to disable
-        // authentication entirely (CVE-2026-56679 class). Require the password
-        // to be changed first.
-        //
-        // NOTE: this intentionally leaves no remote self-service password-change
-        // path — the change-password flow (PATCH /api/settings) requires a JWT,
-        // which we deliberately withhold. A remote fresh-install user must either
-        // change the password from the local machine or set INITIAL_PASSWORD
-        // before first launch. This is a deliberate security trade-off, not an
-        // oversight: issuing any credential before the default password is
-        // rotated re-opens the exact attack chain this branch closes.
+    if (user) {
+      // Check if user is expired
+      if (user.status === "expired") {
         return NextResponse.json(
-          { success: false, error: "Default password must be changed before remote access. Change it from the local machine (or set INITIAL_PASSWORD).", mustChangePassword },
+          { error: "Account expired. Please contact administrator." },
           { status: 403, headers: NO_STORE_HEADERS }
         );
       }
 
-      const cookieStore = await cookies();
-      await setDashboardAuthCookie(cookieStore, request);
+      recordSuccess(ip);
 
-      return NextResponse.json({ success: true, mustChangePassword: false }, { headers: NO_STORE_HEADERS });
+      const cookieStore = await cookies();
+      await setUserSessionCookie(cookieStore, request, user);
+
+      return NextResponse.json(
+        {
+          success: true,
+          user: {
+            id: user.id,
+            username: user.username,
+            role: user.role,
+            status: user.status,
+            daysRemaining: user.daysRemaining,
+          },
+          mustChangePassword: false
+        },
+        { headers: NO_STORE_HEADERS }
+      );
     }
 
     const { remainingBeforeLock } = recordFail(ip);
@@ -102,7 +90,7 @@ export async function POST(request) {
       );
     }
     return NextResponse.json(
-      { error: `Invalid password. ${remainingBeforeLock} attempt(s) left before lockout.`, remainingBeforeLock },
+      { error: `Invalid username or PIN. ${remainingBeforeLock} attempt(s) left before lockout.`, remainingBeforeLock },
       { status: 401 }
     );
   } catch (error) {

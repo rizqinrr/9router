@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { getSettings, validateApiKey } from "@/lib/localDb";
+import { getSettings, getApiKeyByValue, validateApiKey, checkKeyLimits } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
-import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { verifyDashboardAuthToken, getDashboardAuthSession } from "@/lib/auth/dashboardSession";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
@@ -37,6 +37,12 @@ const PUBLIC_API_PATHS = [
 // Keep root-level rewrites here too: middleware runs before Next.js rewrites.
 const PUBLIC_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta", "/codex", "/responses"];
 
+// Admin-only paths — require role=admin
+const ADMIN_PATHS = [
+  "/api/admin",
+  "/dashboard/admin",
+];
+
 // Always require JWT token regardless of requireLogin setting
 const ALWAYS_PROTECTED = [
   "/api/shutdown",
@@ -70,8 +76,6 @@ const PROTECTED_API_PATHS = [
 
 // Routes that spawn child processes or read host secrets — restrict to localhost.
 const LOCAL_ONLY_PATHS = [
-  "/api/cli-tools/cowork-settings",
-  "/api/cli-tools/antigravity-mitm",
   "/api/mcp/",
   "/api/tunnel/tailscale-install",
   "/api/tunnel/tailscale-enable",
@@ -152,6 +156,44 @@ async function hasValidApiKey(request) {
   return await validateApiKey(apiKey);
 }
 
+async function validateApiKeyWithLimits(apiKey) {
+  const keyData = await getApiKeyByValue(apiKey);
+  if (!keyData) return { valid: false, error: "invalid", status: 401, body: { error: "Invalid API key" } };
+
+  if (!keyData.isActive) {
+    return { valid: false, error: "disabled", status: 401, body: { error: "API key is disabled" } };
+  }
+
+  const limits = await checkKeyLimits(keyData);
+
+  if (!limits.allowed) {
+    const errorMap = {
+      expired: { status: 410, error: "API key expired" },
+      token_quota: { status: 429, error: "Token quota exceeded" },
+      request_quota: { status: 429, error: "Request quota exceeded" },
+      cost_quota: { status: 429, error: "Cost quota exceeded" },
+    };
+    const err = errorMap[limits.reason] || { status: 403, error: "Access denied" };
+    return { valid: false, ...err, body: { error: err.error, ...(limits.usage ? { used: limits.usage, limit: { maxTokens: keyData.maxTokens, maxRequests: keyData.maxRequests, maxCost: keyData.maxCost } } : {}) } };
+  }
+
+  const warning = limits.warning > 0 ? String(limits.warning) : null;
+  return { valid: true, warning };
+}
+
+async function canAccessPublicLlmApiWithLimits(request) {
+  if (isLocalRequest(request)) return { allowed: true, warning: null };
+  if (await hasValidCliToken(request)) return { allowed: true, warning: null };
+
+  const apiKey = extractApiKey(request);
+  if (!apiKey) return { allowed: false, status: 401, body: { error: "API key required for remote API access" } };
+
+  const result = await validateApiKeyWithLimits(apiKey);
+  if (!result.valid) return { allowed: false, status: result.status, body: result.body };
+
+  return { allowed: true, warning: result.warning };
+}
+
 async function canAccessPublicLlmApi(request) {
   if (isLocalRequest(request)) return true;
   if (await hasValidCliToken(request)) return true;
@@ -168,6 +210,19 @@ async function canAccessLocalOnlyRoute(request) {
 async function hasValidToken(request) {
   const token = request.cookies.get("auth_token")?.value;
   return await verifyDashboardAuthToken(token);
+}
+
+async function getSession(request) {
+  const token = request.cookies.get("auth_token")?.value;
+  return await getDashboardAuthSession(token);
+}
+
+function isAdmin(session) {
+  return session?.role === "admin";
+}
+
+function isAuthenticatedUser(session) {
+  return session?.authenticated === true && session?.userId;
 }
 
 // Read settings directly from DB to avoid self-fetch deadlock in proxy
@@ -217,15 +272,28 @@ export async function proxy(request) {
   }
 
   if (isPublicLlmApi(pathname)) {
-    if (await canAccessPublicLlmApi(request)) return NextResponse.next();
-    return NextResponse.json({ error: "API key required for remote API access" }, { status: 401 });
+    const result = await canAccessPublicLlmApiWithLimits(request);
+    if (!result.allowed) {
+      return NextResponse.json(result.body, { status: result.status });
+    }
+    const resp = NextResponse.next();
+    if (result.warning) resp.headers.set("X-Quota-Warning", result.warning);
+    return resp;
   }
 
   // Deny-by-default for /api/* — public allow-list bypasses, everything else requires auth.
   if (pathname.startsWith("/api/")) {
     if (isPublicApi(pathname)) return NextResponse.next();
-    if (await hasValidCliToken(request) || await isAuthenticated(request))
+    if (await hasValidCliToken(request) || await isAuthenticated(request)) {
+      // Admin check for admin paths
+      if (ADMIN_PATHS.some(p => pathname.startsWith(p))) {
+        const session = await getSession(request);
+        if (!isAdmin(session)) {
+          return NextResponse.json({ error: "Admin access required" }, { status: 403 });
+        }
+      }
       return NextResponse.next();
+    }
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -261,6 +329,21 @@ export async function proxy(request) {
     const token = request.cookies.get("auth_token")?.value;
     if (token) {
       if (await verifyDashboardAuthToken(token)) {
+        const session = await getSession(request);
+        // Admin check for admin dashboard paths
+        if (pathname.startsWith("/dashboard/admin")) {
+          if (!isAdmin(session)) {
+            return NextResponse.redirect(new URL("/dashboard", request.url));
+          }
+        }
+        // Per-user dashboard path check: /dashboard/{username}/...
+        const userPathMatch = pathname.match(/^\/dashboard\/([^\/]+)/);
+        if (userPathMatch) {
+          const pathUsername = userPathMatch[1];
+          if (pathUsername !== "admin" && session?.username !== pathUsername && !isAdmin(session)) {
+            return NextResponse.redirect(new URL(`/dashboard/${session?.username || ""}`, request.url));
+          }
+        }
         return NextResponse.next();
       } else {
         return NextResponse.redirect(new URL("/login", request.url));

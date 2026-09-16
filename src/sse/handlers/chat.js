@@ -6,6 +6,7 @@ import {
   clearAccountError,
   extractApiKey,
   isValidApiKey,
+  resolveApiKeyToUser,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
@@ -78,6 +79,17 @@ export async function handleChat(request, clientRawRequest = null) {
       log.warn("AUTH", "Invalid API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
     }
+  }
+
+  // Resolve API key to user for per-user connection filtering
+  let userId = null;
+  if (apiKey) {
+    const resolved = await resolveApiKeyToUser(apiKey);
+    if (!resolved) {
+      log.warn("AUTH", "API key resolved to expired/invalid user");
+      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "API key is invalid or account expired");
+    }
+    userId = resolved.userId;
   }
 
   if (!modelStr) {
@@ -231,7 +243,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { userId });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {

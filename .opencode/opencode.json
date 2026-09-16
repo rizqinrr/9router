@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "explorer": {
+      "mode": "subagent",
+      "description": "Analisis project tanpa mengubah kode — membaca struktur, framework, route, dependency, dan business flow",
+      "color": "#4285F4"
+    },
+    "planner": {
+      "mode": "subagent",
+      "description": "Mengubah request menjadi implementation plan — impact analysis, task decomposition, risk assessment, rollback strategy",
+      "color": "#34A853"
+    },
+    "implementer": {
+      "mode": "subagent",
+      "description": "Menghasilkan kode production-ready berdasarkan implementation plan — mengikuti existing pattern, backward compatible",
+      "color": "#EA4335"
+    },
+    "reviewer": {
+      "mode": "subagent",
+      "description": "Audit implementasi — correctness, security, performance, consistency, backward compatibility, duplicate logic",
+      "color": "#FBBC04"
+    },
+    "documenter": {
+      "mode": "subagent",
+      "description": "Membuat dan memperbarui dokumentasi project — SYSTEM_MAP, API_MAP, CHANGELOG, README, cross-reference validation",
+      "color": "#8B5CF6"
+    }
+  }
+}

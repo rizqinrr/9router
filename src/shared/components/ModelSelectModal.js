@@ -20,54 +20,6 @@ const PROVIDER_ORDER = [
 // Providers that need no auth — always show in model selector
 const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVIDERS[id].noAuth);
 
-// Providers with per-account live catalogs via /api/providers/[id]/models.
-// Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass"];
-
-// Fetch a provider's account-scoped catalog for every active connection and merge
-// the results. Entries collapse by model id on purpose: two connections of the
-// same provider produce the same picker value (`alias/id`), so keeping the first
-// avoids duplicate rows. There is no per-connection metadata to preserve beyond
-// {id,name}. Empty array means "nothing live" so callers keep the static fallback.
-function useLiveProviderModels(isOpen, connectionIds, label) {
-  const [models, setModels] = useState([]);
-  const idsKey = (connectionIds ?? []).join("|");
-
-  useEffect(() => {
-    const ids = idsKey ? idsKey.split("|") : [];
-    if (!isOpen || ids.length === 0) {
-      setModels([]);
-      return undefined;
-    }
-
-    let cancelled = false;
-    Promise.all(ids.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
-    }))
-      .then((modelLists) => {
-        if (cancelled) return;
-        const seen = new Set();
-        setModels(modelLists.flat().filter((model) => {
-          if (!model?.id || seen.has(model.id)) return false;
-          seen.add(model.id);
-          return true;
-        }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
-        console.warn(`Unable to load ${label} models for selector:`, error);
-        if (!cancelled) setModels([]);
-      });
-
-    return () => { cancelled = true; };
-  }, [isOpen, idsKey, label]);
-
-  return models;
-}
-
 export default function ModelSelectModal({
   isOpen,
   onClose,
@@ -78,7 +30,6 @@ export default function ModelSelectModal({
   title = "Select Model",
   modelAliases = {},
   kindFilter = null,
-  capFilter = null,
   addedModelValues = [],
   closeOnSelect = true,
 }) {
@@ -97,25 +48,7 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
-  // Cursor and Cline expose the usable catalog per account, so the static catalog is
-  // kept only as a fallback: it goes stale quickly and entitlements differ per account.
-  // Single map driven by LIVE_CATALOG_PROVIDERS so the constant cannot drift
-  // from the memos below; per-provider arrays stay referentially stable unless
-  // activeProviders itself changes.
-  const liveConnectionIdsByProvider = useMemo(() => {
-    const map = Object.fromEntries(LIVE_CATALOG_PROVIDERS.map((id) => [id, []]));
-    for (const p of activeProviders) {
-      if (p?.id && Object.prototype.hasOwnProperty.call(map, p.provider)) map[p.provider].push(p.id);
-    }
-    return map;
-  }, [activeProviders]);
-  const cursorConnectionIds = liveConnectionIdsByProvider.cursor;
-  const clineConnectionIds = liveConnectionIdsByProvider.cline;
-  const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
-
-  const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
-  const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
-  const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
+  const [discoveredModels, setDiscoveredModels] = useState({});
 
   const fetchCombos = async () => {
     try {
@@ -180,6 +113,34 @@ export default function ModelSelectModal({
   useEffect(() => {
     if (isOpen) fetchDisabledModels();
   }, [isOpen]);
+
+  const fetchDiscoveredModels = async () => {
+    const customProviderIds = filteredActiveProviders
+      .filter(p => isOpenAICompatibleProvider(p.provider) || isAnthropicCompatibleProvider(p.provider))
+      .map(p => p.provider);
+
+    if (customProviderIds.length === 0) return;
+
+    const results = {};
+    await Promise.all(customProviderIds.map(async (providerId) => {
+      try {
+        const res = await fetch(`/api/models/discover?providerId=${encodeURIComponent(providerId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          results[providerId] = data.models || [];
+        } else {
+          results[providerId] = [];
+        }
+      } catch {
+        results[providerId] = [];
+      }
+    }));
+    setDiscoveredModels(results);
+  };
+
+  useEffect(() => {
+    if (isOpen) fetchDiscoveredModels();
+  }, [isOpen, filteredActiveProviders]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
 
@@ -299,16 +260,12 @@ export default function ModelSelectModal({
           };
         }
       } else if (isCustomProvider) {
-        // Custom (openai/anthropic-compatible) providers are LLM-only — skip for typed media kinds
         if (kindFilter && TYPED_KINDS.has(kindFilter)) return;
-        // Find connection object to get prefix synchronously without waiting for providerNodes fetch
         const connection = activeProviders.find(p => p.provider === providerId);
         const matchedNode = providerNodes.find(node => node.id === providerId);
         const displayName = matchedNode?.name || connection?.name || providerInfo.name;
         const nodePrefix = connection?.providerSpecificData?.prefix || matchedNode?.prefix || providerId;
 
-        // Aliases are stored using the raw providerId as key (e.g. "openai-compatible-chat-<uuid>/glm-4.7"),
-        // so we must filter by providerId, not by the display prefix.
         const nodeModels = Object.entries(modelAliases)
           .filter(([, fullModel]) => fullModel.startsWith(`${providerId}/`))
           .map(([aliasName, fullModel]) => ({
@@ -317,22 +274,22 @@ export default function ModelSelectModal({
             value: `${nodePrefix}/${fullModel.replace(`${providerId}/`, "")}`,
           }));
 
-        // Merge custom models registered via /api/models/custom for this provider
-        // providerAlias in DB uses the raw providerId, not the display prefix
-        const registeredCustom = customModels
-          .filter((m) => m.providerAlias === providerId)
-          .map((m) => ({
-            id: m.id,
-            name: m.name || m.id,
-            value: `${nodePrefix}/${m.id}`,
-            isCustom: true,
+        const liveModelIds = discoveredModels[providerId] || [];
+        const liveModels = liveModelIds
+          .filter(mid => {
+            const alreadyCoveredById = nodeModels.some(nm => nm.id === mid || nm.value === `${nodePrefix}/${mid}`);
+            const alreadyCoveredByName = nodeModels.some(nm => nm.name === mid);
+            return !alreadyCoveredById && !alreadyCoveredByName;
+          })
+          .map(mid => ({
+            id: mid,
+            name: mid,
+            value: `${nodePrefix}/${mid}`,
           }));
-        const seen = new Set(nodeModels.map((m) => m.value));
-        const mergedModels = [...nodeModels, ...registeredCustom.filter((m) => !seen.has(m.value))];
 
-        // Always show compatible providers that are connected, even with no aliases.
-        // When no aliases exist, show a placeholder so users know it's available.
-        const modelsToShow = mergedModels.length > 0 ? mergedModels : [{
+        const allModels = [...nodeModels, ...liveModels];
+
+        const modelsToShow = allModels.length > 0 ? allModels : [{
           id: `__placeholder__${providerId}`,
           name: `${nodePrefix}/model-id`,
           value: `${nodePrefix}/model-id`,
@@ -345,13 +302,10 @@ export default function ModelSelectModal({
           color: providerInfo.color,
           models: modelsToShow,
           isCustom: true,
-          hasModels: mergedModels.length > 0,
+          hasModels: allModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : [];
-        const hardcodedModels = liveModels.length > 0
-          ? liveModels
-          : getModelsByProviderId(providerId);
+        const hardcodedModels = getModelsByProviderId(providerId);
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
         // Custom models: if no hardcoded models (e.g. openrouter), show all aliases for this provider
@@ -420,11 +374,11 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
-    if (kindFilter || capFilter) return [];
+    if (kindFilter) return [];
     if (!searchQuery.trim()) return combos;
     const query = searchQuery.toLowerCase();
     return combos.filter(c => c.name.toLowerCase().includes(query));
@@ -444,11 +398,6 @@ export default function ModelSelectModal({
     const filtered = {};
     Object.entries(groupedModels).forEach(([providerId, group]) => {
       let models = group.models;
-      // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
-      if (capFilter) {
-        models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
-        if (models.length === 0) return;
-      }
       if (query) {
         const providerNameMatches = group.name.toLowerCase().includes(query);
         models = models.filter(

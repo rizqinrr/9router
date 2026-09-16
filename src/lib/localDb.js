@@ -10,7 +10,8 @@ export {
   createProviderNode, updateProviderNode, deleteProviderNode,
   getProxyPools, getProxyPoolById,
   createProxyPool, updateProxyPool, deleteProxyPool,
-  getApiKeys, getApiKeyById, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
+  getApiKeys, getApiKeyById, getApiKeyByValue, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
+  getKeyUsageSummary, checkKeyLimits,
   getCombos, getComboById, getComboByName,
   createCombo, updateCombo, deleteCombo,
   getModelAliases, setModelAlias, deleteModelAlias,
@@ -18,4 +19,8 @@ export {
   getMitmAlias, setMitmAliasAll,
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
   exportDb, importDb,
+  getUsers, getUserById, getUserByUsername,
+  createUser, updateUser, deleteUser,
+  verifyUserPin, addDaysToUser, resetUserPin,
+  tickCountdown, hardDeleteExpiredUsers, getActiveUserCount,
 } from "@/lib/db/index.js";

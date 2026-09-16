@@ -9,14 +9,19 @@ function rowToCombo(row) {
     name: row.name,
     kind: row.kind,
     models: parseJson(row.models, []),
+    userId: row.userId || null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-export async function getCombos() {
+export async function getCombos(filter = {}) {
   const db = await getAdapter();
-  const rows = db.all(`SELECT * FROM combos ORDER BY createdAt ASC`);
+  const where = [];
+  const params = [];
+  if (filter.userId !== undefined && filter.userId !== null) { where.push("userId = ?"); params.push(filter.userId); }
+  const sql = `SELECT * FROM combos${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY createdAt ASC`;
+  const rows = db.all(sql, params);
   return rows.map(rowToCombo);
 }
 
@@ -40,12 +45,13 @@ export async function createCombo(data) {
     name: data.name,
     kind: data.kind || null,
     models: data.models || [],
+    userId: data.userId || null,
     createdAt: now,
     updatedAt: now,
   };
   db.run(
-    `INSERT INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
-    [combo.id, combo.name, combo.kind, stringifyJson(combo.models), combo.createdAt, combo.updatedAt]
+    `INSERT INTO combos(id, name, kind, models, userId, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+    [combo.id, combo.name, combo.kind, stringifyJson(combo.models), combo.userId, combo.createdAt, combo.updatedAt]
   );
   return combo;
 }
@@ -58,8 +64,8 @@ export async function updateCombo(id, data) {
     if (!row) return;
     const merged = { ...rowToCombo(row), ...data, updatedAt: new Date().toISOString() };
     db.run(
-      `UPDATE combos SET name = ?, kind = ?, models = ?, updatedAt = ? WHERE id = ?`,
-      [merged.name, merged.kind, stringifyJson(merged.models || []), merged.updatedAt, id]
+      `UPDATE combos SET name = ?, kind = ?, models = ?, userId = ?, updatedAt = ? WHERE id = ?`,
+      [merged.name, merged.kind, stringifyJson(merged.models || []), merged.userId ?? null, merged.updatedAt, id]
     );
     result = merged;
   });

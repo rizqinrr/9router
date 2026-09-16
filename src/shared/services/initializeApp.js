@@ -3,6 +3,8 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { existsSync } from "fs";
 import { cleanupProviderConnections, getSettings, updateSettings, getApiKeys } from "@/lib/localDb";
+import { startCountdownScheduler } from "@/lib/scheduler/countdown";
+import { getUserByUsername, createUser } from "@/lib/db/repos/usersRepo";
 import {
   enableTunnel, enableTailscale,
   isTunnelManuallyDisabled, isTunnelReconnecting, isTailscaleReconnecting,
@@ -118,6 +120,32 @@ async function runHeavyStartup() {
   import("@/sse/services/backgroundTokenRefresh.js")
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
+
+  // Multi-user: seed admin user + start countdown scheduler
+  await seedAdminUser();
+  startCountdownScheduler();
+}
+
+async function seedAdminUser() {
+  try {
+    const username = process.env.INITIAL_ADMIN_USERNAME || "admin";
+    const existing = await getUserByUsername(username);
+    if (existing) {
+      console.log(`[InitApp] Admin user "${username}" already exists, skipping seed`);
+      return;
+    }
+
+    const pin = process.env.INITIAL_ADMIN_PIN || "1234";
+    await createUser({
+      username,
+      pin,
+      role: "admin",
+      daysRemaining: 36500, // ~100 years
+    });
+    console.log(`[InitApp] Admin user "${username}" seeded successfully`);
+  } catch (error) {
+    console.error("[InitApp] Failed to seed admin user:", error.message);
+  }
 }
 
 function hasQuotaAutoPingEnabled(settings) {

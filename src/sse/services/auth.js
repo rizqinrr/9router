@@ -1,4 +1,5 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools, getApiKeyByValue } from "@/lib/localDb";
+import { getUserById } from "@/lib/db/repos/usersRepo";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
@@ -24,6 +25,7 @@ function githubMonthlyResetMs(status, errorText, provider) {
  * @param {string} provider - Provider name
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
  * @param {string|null} model - Model name for per-model rate limit filtering
+ * @param {number|null} userId - Filter connections to this user (null = all, for admin)
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
   // Normalize to Set for consistent handling
@@ -31,6 +33,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const userId = options?.userId || null;
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -69,7 +72,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       };
     }
 
-    const connections = await getProviderConnections({ provider: providerId, isActive: true });
+    const connections = await getProviderConnections({ provider: providerId, isActive: true, userId });
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
@@ -356,9 +359,31 @@ export function extractApiKey(request) {
 }
 
 /**
+ * Resolve API key to userId and check user status
+ * Returns { userId, user, isAdmin } or null if invalid/expired
+ */
+export async function resolveApiKeyToUser(apiKey) {
+  if (!apiKey) return null;
+  const keyData = await getApiKeyByValue(apiKey);
+  if (!keyData || !keyData.isActive) return null;
+  if (!keyData.userId) return { userId: null, user: null, isAdmin: false }; // Legacy key without userId
+
+  const user = await getUserById(keyData.userId);
+  if (!user) return null;
+  if (user.status === "expired") return null;
+
+  return {
+    userId: user.id,
+    user,
+    isAdmin: user.role === "admin",
+  };
+}
+
+/**
  * Validate API key (optional - for local use can skip)
  */
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
-  return await validateApiKey(apiKey);
+  const resolved = await resolveApiKeyToUser(apiKey);
+  return resolved !== null;
 }

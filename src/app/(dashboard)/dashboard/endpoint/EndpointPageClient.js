@@ -4,33 +4,76 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 import {
+  WENYAN_LOCALES,
   TUNNEL_BENEFITS,
   TUNNEL_PING_INTERVAL_MS,
   TUNNEL_PING_MAX_MS,
   STATUS_POLL_FAST_MS,
   REACHABLE_MISS_THRESHOLD,
   CLIENT_PING_FAST_MS,
+  CAVEMAN_LEVELS,
+  PONYTAIL_LEVELS,
 } from "./endpointConstants";
 import { clientPingUrl, clientPingAny } from "./endpointPing";
 import EndpointRow from "./components/EndpointRow";
 import StatusAlert from "./components/StatusAlert";
 import Tooltip from "./components/Tooltip";
 import SecurityWarning from "./components/SecurityWarning";
+
+function UsageBar({ label, used, max, format = "" }) {
+  if (!max) return null;
+  const pct = Math.min(100, (used / max) * 100);
+  const barColor = pct >= 95 ? "bg-red-500" : pct >= 80 ? "bg-orange-400" : "bg-green-500";
+  return (
+    <div className="flex items-center gap-1.5 min-w-[60px]">
+      <span className="text-[10px] text-text-muted whitespace-nowrap">{label} {Math.round(pct)}%</span>
+      <div className="w-10 h-1 bg-black/10 dark:bg-white/10 rounded-full overflow-hidden flex-shrink-0">
+        <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function fmtNum(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(n);
+}
+
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyValidDays, setNewKeyValidDays] = useState("");
+  const [newKeyMaxTokens, setNewKeyMaxTokens] = useState("");
+  const [newKeyMaxRequests, setNewKeyMaxRequests] = useState("");
+  const [newKeyMaxCost, setNewKeyMaxCost] = useState("");
   const [createdKey, setCreatedKey] = useState(null);
   const [confirmState, setConfirmState] = useState(null);
 
   const [requireApiKey, setRequireApiKey] = useState(false);
   const [requireLogin, setRequireLogin] = useState(true);
   const [hasPassword, setHasPassword] = useState(true);
- const [tunnelDashboardAccess, setTunnelDashboardAccess] = useState(false);
+  const [tunnelDashboardAccess, setTunnelDashboardAccess] = useState(false);
+  const [rtkEnabled, setRtkEnabledState] = useState(true);
+  const [headroomEnabled, setHeadroomEnabled] = useState(false);
+  const [headroomUrl, setHeadroomUrl] = useState("http://localhost:8787");
+  const [headroomCompressUserMessages, setHeadroomCompressUserMessages] = useState(false);
+  const [headroomStatus, setHeadroomStatus] = useState({ installed: false, running: false, python: null, loading: true });
+  const [showHeadroomInstallModal, setShowHeadroomInstallModal] = useState(false);
+  const [headroomActionLoading, setHeadroomActionLoading] = useState(false);
+  const [headroomActionError, setHeadroomActionError] = useState("");
+  const [cavemanEnabled, setCavemanEnabled] = useState(false);
+  const [cavemanLevel, setCavemanLevel] = useState("full");
+  const [ponytailEnabled, setPonytailEnabled] = useState(false);
+  const [ponytailLevel, setPonytailLevel] = useState("full");
+  const [locale, setLocale] = useState("en");
 
- // Cloudflare Tunnel state
+  // Cloudflare Tunnel state
   const [tunnelChecking, setTunnelChecking] = useState(true);
   const [tunnelEnabled, setTunnelEnabled] = useState(false);
   const [tunnelReachable, setTunnelReachable] = useState(false);
@@ -83,6 +126,26 @@ export default function APIPageClient({ machineId }) {
     if (typeof window !== "undefined")
       setIsRemoteHost(!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname));
   }, []);
+
+  // Track app UI locale to gate wenyan caveman levels
+  useEffect(() => {
+    setLocale(getCurrentLocale());
+    return onLocaleChange(() => setLocale(getCurrentLocale()));
+  }, []);
+
+  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
+  const visibleCavemanLevels = isWenyanLocale
+    ? CAVEMAN_LEVELS
+    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
+
+  // Reset wenyan level to "ultra" when leaving a Chinese locale
+  useEffect(() => {
+    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
+    if (current?.wenyan && !isWenyanLocale) {
+      setCavemanLevel("ultra");
+      patchSetting({ cavemanLevel: "ultra" });
+    }
+  }, [isWenyanLocale, cavemanLevel]);
 
   const { copied, copy } = useCopyToClipboard();
 
@@ -204,6 +267,15 @@ export default function APIPageClient({ machineId }) {
         setRequireLogin(data.requireLogin !== false);
         setHasPassword(data.hasPassword || false);
         setTunnelDashboardAccess(data.tunnelDashboardAccess || false);
+        setRtkEnabledState(data.rtkEnabled !== false);
+        setHeadroomEnabled(!!data.headroomEnabled);
+        setHeadroomUrl(data.headroomUrl || "http://localhost:8787");
+        setHeadroomCompressUserMessages(!!data.headroomCompressUserMessages);
+        refreshHeadroomStatus();
+        setCavemanEnabled(!!data.cavemanEnabled);
+        setCavemanLevel(data.cavemanLevel || "full");
+        setPonytailEnabled(!!data.ponytailEnabled);
+        setPonytailLevel(data.ponytailLevel || "full");
       }
       if (statusRes.ok) {
         const data = await statusRes.json();
@@ -253,28 +325,112 @@ export default function APIPageClient({ machineId }) {
     }
   };
 
+  const handleRtkEnabled = async (value) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rtkEnabled: value }),
+      });
+      if (res.ok) setRtkEnabledState(value);
+    } catch (error) {
+      console.log("Error updating rtkEnabled:", error);
+    }
+  };
+
+  const patchSetting = async (patch) => {
+    try {
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+    } catch (error) {
+      console.log("Error updating setting:", error);
+    }
+  };
+
+  const handleCavemanEnabled = (value) => {
+    setCavemanEnabled(value);
+    patchSetting({ cavemanEnabled: value });
+  };
+
+  const handleHeadroomEnabled = (value) => {
+    const nextUrl = headroomUrl.trim() || "http://localhost:8787";
+    setHeadroomUrl(nextUrl);
+    setHeadroomEnabled(value);
+    patchSetting({ headroomEnabled: value, headroomUrl: nextUrl });
+  };
+
+  const handleHeadroomUrlBlur = () => {
+    const next = headroomUrl.trim() || "http://localhost:8787";
+    setHeadroomUrl(next);
+    patchSetting({ headroomUrl: next });
+  };
+
+  const handleHeadroomCompressUserMessages = (value) => {
+    setHeadroomCompressUserMessages(value);
+    patchSetting({ headroomCompressUserMessages: value });
+  };
+
+  const refreshHeadroomStatus = useCallback(async () => {
+    setHeadroomStatus((s) => ({ ...s, loading: true }));
+    try {
+      const res = await fetch("/api/headroom/status", { headers: { "Cache-Control": "no-store" } });
+      const data = await res.json();
+      setHeadroomStatus({ ...data, loading: false });
+    } catch {
+      setHeadroomStatus({ installed: false, running: false, python: null, loading: false });
+    }
+  }, []);
+
+  const handleHeadroomStart = useCallback(async () => {
+    setHeadroomActionError("");
+    setHeadroomActionLoading(true);
+    try {
+      const res = await fetch("/api/headroom/start", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to start proxy");
+      await refreshHeadroomStatus();
+    } catch (e) {
+      setHeadroomActionError(e.message);
+    } finally {
+      setHeadroomActionLoading(false);
+    }
+  }, [refreshHeadroomStatus]);
+
+  const handleHeadroomStop = useCallback(async () => {
+    setHeadroomActionLoading(true);
+    try {
+      await fetch("/api/headroom/stop", { method: "POST" });
+      await refreshHeadroomStatus();
+    } finally {
+      setHeadroomActionLoading(false);
+    }
+  }, [refreshHeadroomStatus]);
+
+  const handleCavemanLevel = (level) => {
+    setCavemanLevel(level);
+    patchSetting({ cavemanLevel: level });
+  };
+
+  const handlePonytailEnabled = (value) => {
+    setPonytailEnabled(value);
+    patchSetting({ ponytailEnabled: value });
+  };
+
+  const handlePonytailLevel = (level) => {
+    setPonytailLevel(level);
+    patchSetting({ ponytailLevel: level });
+  };
+
   const fetchData = async () => {
     try {
-      const fetchKeys = async () => {
-        const res = await fetch("/api/keys");
-        if (!res.ok) return [];
-        const data = await res.json();
-        return data.keys || [];
-      };
-
-      let existing = await fetchKeys();
-      // Auto-provision a default key for first-time users so the endpoint works out of the box.
-      if (existing.length === 0) {
-        try {
-          const createRes = await fetch("/api/keys", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: "Default Key" }),
-          });
-          if (createRes.ok) existing = await fetchKeys();
-        } catch { /* fall through to empty render */ }
+      const keysRes = await fetch("/api/keys");
+      const keysData = await keysRes.json();
+      if (keysRes.ok) {
+        setKeys(keysData.keys || []);
       }
-      setKeys(existing);
     } catch (error) {
       console.log("Error fetching data:", error);
     } finally {
@@ -626,10 +782,16 @@ export default function APIPageClient({ machineId }) {
     if (!newKeyName.trim()) return;
 
     try {
+      const body = { name: newKeyName };
+      if (newKeyValidDays) body.validDays = parseInt(newKeyValidDays, 10);
+      if (newKeyMaxTokens) body.maxTokens = parseInt(newKeyMaxTokens, 10);
+      if (newKeyMaxRequests) body.maxRequests = parseInt(newKeyMaxRequests, 10);
+      if (newKeyMaxCost) body.maxCost = parseFloat(newKeyMaxCost);
+
       const res = await fetch("/api/keys", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
 
@@ -637,6 +799,10 @@ export default function APIPageClient({ machineId }) {
         setCreatedKey(data.key);
         await fetchData();
         setNewKeyName("");
+        setNewKeyValidDays("");
+        setNewKeyMaxTokens("");
+        setNewKeyMaxRequests("");
+        setNewKeyMaxCost("");
         setShowAddModal(false);
       }
     } catch (error) {
@@ -1010,70 +1176,253 @@ export default function APIPageClient({ machineId }) {
             {keys.map((key) => (
               <div
                 key={key.id}
-                className={`group flex items-center justify-between py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
+                className={`group flex flex-col py-2.5 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 ${key.isActive === false ? "opacity-60" : ""}`}
               >
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">{key.name}</p>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="text-xs text-text-muted font-mono">
-                      {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
-                    </code>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-medium whitespace-nowrap">{key.name}</p>
+                      <code className="text-xs text-text-muted font-mono truncate max-w-[280px]">
+                        {visibleKeys.has(key.id) ? key.key : maskKey(key.key)}
+                      </code>
+                      <button
+                        onClick={() => toggleKeyVisibility(key.id)}
+                        className="p-0.5 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-0 group-hover:opacity-100 transition-all"
+                        title={visibleKeys.has(key.id) ? "Hide" : "Show"}
+                      >
+                        <span className="material-symbols-outlined text-[14px]">
+                          {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
+                        </span>
+                      </button>
+                      <button
+                        onClick={() => copy(key.key, key.id)}
+                        className="p-0.5 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary opacity-0 group-hover:opacity-100 transition-all"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">
+                          {copied === key.id ? "check" : "content_copy"}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                  {key.usage && (key.usage.totalTokens > 0 || key.usage.totalRequests > 0) && (
+                    <div className="hidden sm:flex items-center gap-2 flex-shrink-0">
+                      <UsageBar label="Tok" used={key.usage.totalTokens} max={key.maxTokens} />
+                      <UsageBar label="Req" used={key.usage.totalRequests} max={key.maxRequests} />
+                      <UsageBar label="$" used={key.usage.totalCost} max={key.maxCost} />
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    <Toggle
+                      size="sm"
+                      checked={key.isActive ?? true}
+                      onChange={(checked) => {
+                        if (key.isActive && !checked) {
+                          setConfirmState({
+                            title: "Pause API Key",
+                            message: `Pause API key "${key.name}"?\n\nThis key will stop working immediately but can be resumed later.`,
+                            onConfirm: async () => {
+                              setConfirmState(null);
+                              handleToggleKey(key.id, checked);
+                            }
+                          });
+                        } else {
+                          handleToggleKey(key.id, checked);
+                        }
+                      }}
+                      title={key.isActive ? "Pause key" : "Resume key"}
+                    />
                     <button
-                      onClick={() => toggleKeyVisibility(key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                      title={visibleKeys.has(key.id) ? "Hide key" : "Show key"}
+                      onClick={() => handleDeleteKey(key.id)}
+                      className="p-1.5 hover:bg-red-500/10 rounded text-red-500 opacity-0 group-hover:opacity-100 transition-all"
                     >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {visibleKeys.has(key.id) ? "visibility_off" : "visibility"}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => copy(key.key, key.id)}
-                      className="p-1 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-all"
-                    >
-                      <span className="material-symbols-outlined text-[14px]">
-                        {copied === key.id ? "check" : "content_copy"}
-                      </span>
+                      <span className="material-symbols-outlined text-[18px]">delete</span>
                     </button>
                   </div>
-                  <p className="text-xs text-text-muted mt-1">
-                    Created {new Date(key.createdAt).toLocaleDateString()}
-                  </p>
-                  {key.isActive === false && (
-                    <p className="text-xs text-orange-500 mt-1">Paused</p>
-                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <Toggle
-                    size="sm"
-                    checked={key.isActive ?? true}
-                    onChange={(checked) => {
-                      if (key.isActive && !checked) {
-                        setConfirmState({
-                          title: "Pause API Key",
-                          message: `Pause API key "${key.name}"?\n\nThis key will stop working immediately but can be resumed later.`,
-                          onConfirm: async () => {
-                            setConfirmState(null);
-                            handleToggleKey(key.id, checked);
-                          }
-                        });
-                      } else {
-                        handleToggleKey(key.id, checked);
-                      }
-                    }}
-                    title={key.isActive ? "Pause key" : "Resume key"}
-                  />
-                  <button
-                    onClick={() => handleDeleteKey(key.id)}
-                    className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all"
-                  >
-                    <span className="material-symbols-outlined text-[18px]">delete</span>
-                  </button>
+                <div className="flex items-center gap-2 text-xs text-text-muted mt-1 flex-wrap">
+                  <span>Created {new Date(key.createdAt).toLocaleDateString()}</span>
+                  {key.isActive === false && <span className="text-orange-500">· Paused</span>}
+                  {key.validDays && <span className="text-text-muted/70">· {key.validDays}d valid</span>}
+                  {key.maxTokens && <span className="text-text-muted/70">· {fmtNum(key.maxTokens)} tok</span>}
+                  {key.maxRequests && <span className="text-text-muted/70">· {key.maxRequests} req</span>}
+                  {key.maxCost && <span className="text-text-muted/70">· ${key.maxCost}</span>}
+                  {key.usage && (key.usage.totalTokens > 0 || key.usage.totalRequests > 0) && (
+                    <span className="sm:hidden text-text-muted/70">
+                      · {fmtNum(key.usage.totalTokens)} tok · {key.usage.totalRequests} req · ${key.usage.totalCost.toFixed(2)}
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
           </div>
         )}
+      </Card>
+
+      {/* Token Saver (RTK + Caveman) */}
+      <Card id="rtk">
+        <div className="flex items-center justify-between mb-2">
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            <span className="material-symbols-outlined text-primary">bolt</span>
+            Token Saver
+          </h2>
+        </div>
+        <div className="flex items-center justify-between pt-2 pb-4 border-b border-border gap-4">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Compress tool output{" "}
+              <a
+                href="https://github.com/rtk-ai/rtk"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-normal text-primary underline hover:opacity-80"
+              >
+                (RTK)
+              </a>
+            </p>
+            <p className="text-sm text-text-muted">
+              git/grep/ls/tree/logs → 60-90% fewer input tokens
+            </p>
+          </div>
+          <Toggle
+            checked={rtkEnabled}
+            onChange={() => handleRtkEnabled(!rtkEnabled)}
+          />
+        </div>
+        <div className="flex items-center justify-between py-4 border-b border-border gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-3 flex-wrap">
+              <p className="font-medium">
+                Compress context{" "}
+                <a
+                  href="https://github.com/chopratejas/headroom"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs font-normal text-primary underline hover:opacity-80"
+                >
+                  (Headroom)
+                </a>
+              </p>
+              <span className={`text-xs px-2 py-0.5 rounded ${headroomStatus.installed && headroomStatus.running ? "bg-success/15 text-success" : "bg-warning/15 text-warning"}`}>
+                {headroomStatus.loading
+                  ? "Checking…"
+                  : !headroomStatus.installed
+                    ? "Not installed"
+                    : !headroomStatus.running
+                      ? "Proxy off"
+                      : "Running"}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowHeadroomInstallModal(true)}
+                className="text-xs text-primary underline hover:opacity-80"
+              >
+                  {headroomStatus.installed && headroomStatus.running ? "Manage" : "Setup"}
+              </button>
+            </div>
+            <p className="text-sm text-text-muted mt-1">
+              Compress prompts via /v1/compress before routing to the model
+            </p>
+          </div>
+          <Toggle
+            checked={headroomEnabled && headroomStatus.installed && headroomStatus.running}
+            disabled={!headroomStatus.installed || !headroomStatus.running}
+            onChange={() => handleHeadroomEnabled(!headroomEnabled)}
+          />
+        </div>
+        <div className="flex items-center justify-between pt-4 gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Compress LLM output{" "}
+              <a
+                href="https://github.com/JuliusBrussee/caveman"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-normal text-primary underline hover:opacity-80"
+              >
+                (Caveman)
+              </a>
+            </p>
+            <p className="text-sm text-text-muted">
+              Terse-style system prompt → ~65% fewer output tokens (up to 87%)
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {cavemanEnabled && (
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1.5">
+                  {visibleCavemanLevels.map((lvl) => (
+                    <button
+                      key={lvl.id}
+                      onClick={() => handleCavemanLevel(lvl.id)}
+                      className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
+                        cavemanLevel === lvl.id
+                          ? "bg-primary text-white border-primary"
+                          : "bg-transparent border-border text-text-muted hover:bg-surface-2"
+                      }`}
+                      title={lvl.desc}
+                    >
+                      {lvl.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-primary">
+                  {CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel)?.desc}
+                </p>
+              </div>
+            )}
+            <Toggle
+              checked={cavemanEnabled}
+              onChange={() => handleCavemanEnabled(!cavemanEnabled)}
+            />
+          </div>
+        </div>
+        <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">
+              Lazy senior dev{" "}
+              <a
+                href="https://github.com/DietrichGebert/ponytail"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-normal text-primary underline hover:opacity-80"
+              >
+                (Ponytail)
+              </a>
+            </p>
+            <p className="text-sm text-text-muted">
+              Bias the model toward minimal code: YAGNI, reuse stdlib, deletion over addition
+            </p>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            {ponytailEnabled && (
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1.5">
+                  {PONYTAIL_LEVELS.map((lvl) => (
+                    <button
+                      key={lvl.id}
+                      onClick={() => handlePonytailLevel(lvl.id)}
+                      className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
+                        ponytailLevel === lvl.id
+                          ? "bg-primary text-white border-primary"
+                          : "bg-transparent border-border text-text-muted hover:bg-surface-2"
+                      }`}
+                      title={lvl.desc}
+                    >
+                      {lvl.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-primary">
+                  {PONYTAIL_LEVELS.find((lvl) => lvl.id === ponytailLevel)?.desc}
+                </p>
+              </div>
+            )}
+            <Toggle
+              checked={ponytailEnabled}
+              onChange={() => handlePonytailEnabled(!ponytailEnabled)}
+            />
+          </div>
+        </div>
       </Card>
 
       {/* Add Key Modal */}
@@ -1083,6 +1432,10 @@ export default function APIPageClient({ machineId }) {
         onClose={() => {
           setShowAddModal(false);
           setNewKeyName("");
+          setNewKeyValidDays("");
+          setNewKeyMaxTokens("");
+          setNewKeyMaxRequests("");
+          setNewKeyMaxCost("");
         }}
       >
         <div className="flex flex-col gap-4">
@@ -1092,6 +1445,37 @@ export default function APIPageClient({ machineId }) {
             onChange={(e) => setNewKeyName(e.target.value)}
             placeholder="Production Key"
           />
+          <p className="text-xs text-text-muted -mb-2">Limits (optional — leave empty for unlimited)</p>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Valid Days"
+              value={newKeyValidDays}
+              onChange={(e) => setNewKeyValidDays(e.target.value)}
+              placeholder="∞"
+              type="number"
+            />
+            <Input
+              label="Max Tokens"
+              value={newKeyMaxTokens}
+              onChange={(e) => setNewKeyMaxTokens(e.target.value)}
+              placeholder="∞"
+              type="number"
+            />
+            <Input
+              label="Max Requests"
+              value={newKeyMaxRequests}
+              onChange={(e) => setNewKeyMaxRequests(e.target.value)}
+              placeholder="∞"
+              type="number"
+            />
+            <Input
+              label="Max Cost ($)"
+              value={newKeyMaxCost}
+              onChange={(e) => setNewKeyMaxCost(e.target.value)}
+              placeholder="∞"
+              type="number"
+            />
+          </div>
           <div className="flex gap-2">
             <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
               Create
@@ -1100,6 +1484,10 @@ export default function APIPageClient({ machineId }) {
               onClick={() => {
                 setShowAddModal(false);
                 setNewKeyName("");
+                setNewKeyValidDays("");
+                setNewKeyMaxTokens("");
+                setNewKeyMaxRequests("");
+                setNewKeyMaxCost("");
               }}
               variant="ghost"
               fullWidth
@@ -1287,6 +1675,58 @@ export default function APIPageClient({ machineId }) {
               {tsLoading ? "Disabling..." : "Disable"}
             </Button>
             <Button onClick={() => setShowDisableTsModal(false)} variant="ghost" fullWidth disabled={tsLoading}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Headroom Install Guide Modal */}
+      <Modal
+        isOpen={showHeadroomInstallModal}
+        title={headroomStatus.installed ? "Headroom" : "Install Headroom"}
+        onClose={() => setShowHeadroomInstallModal(false)}
+      >
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between text-sm">
+            <span>Status</span>
+            <span className={headroomStatus.installed && headroomStatus.running ? "text-success" : "text-warning"}>
+              {headroomStatus.loading
+                ? "Checking…"
+                : !headroomStatus.installed
+                  ? "Not installed"
+                  : !headroomStatus.running
+                    ? "Proxy off"
+                    : "Running"}
+            </span>
+          </div>
+          {headroomStatus.installed ? (
+            headroomStatus.running ? (
+              <Button onClick={handleHeadroomStop} variant="ghost" fullWidth disabled={headroomActionLoading}>
+                {headroomActionLoading ? "Stopping…" : "Stop Headroom"}
+              </Button>
+            ) : (
+              <Button onClick={handleHeadroomStart} fullWidth disabled={headroomActionLoading}>
+                {headroomActionLoading ? "Starting…" : "Start Headroom"}
+              </Button>
+            )
+          ) : !headroomStatus.python ? (
+            <p className="text-sm text-warning">Python ≥ 3.10 required. Install Python first.</p>
+          ) : (
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-medium">Install then click Start:</p>
+              <div className="flex items-center gap-2">
+                <pre className="flex-1 rounded bg-black/5 dark:bg-white/5 p-2 text-xs font-mono overflow-x-auto">{`pip install "headroom-ai[proxy]"`}</pre>
+                <Button size="sm" variant="ghost" onClick={() => copy(`pip install "headroom-ai[proxy]"`)}>
+                  {copied ? "Copied" : "Copy"}
+                </Button>
+              </div>
+            </div>
+          )}
+          {headroomActionError && (
+            <p className="text-sm text-warning">{headroomActionError}</p>
+          )}
+          <div className="flex gap-2">
+            <Button onClick={() => refreshHeadroomStatus()} variant="ghost" fullWidth>Recheck</Button>
+            <Button onClick={() => setShowHeadroomInstallModal(false)} fullWidth>Done</Button>
           </div>
         </div>
       </Modal>
