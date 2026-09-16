@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { Card, Button, Toggle, Input } from "@/shared/components";
 import Modal, { ConfirmModal } from "@/shared/components/Modal";
 import LanguageSwitcher from "@/shared/components/LanguageSwitcher";
+import CountdownBanner from "@/shared/components/CountdownBanner";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
@@ -27,6 +28,7 @@ export default function ProfilePage() {
   const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [settings, setSettings] = useState({ fallbackStrategy: "fill-first" });
   const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
   const [passwords, setPasswords] = useState({ current: "", new: "", confirm: "" });
   const [passStatus, setPassStatus] = useState({ type: "", message: "" });
   const [passLoading, setPassLoading] = useState(false);
@@ -81,13 +83,24 @@ export default function ProfilePage() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
-  const [isRemoteHost, setIsRemoteHost] = useState(false);
-  useEffect(() => {
-    if (typeof window !== "undefined")
-      setIsRemoteHost(!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname));
-  }, []);
+  const [isRemoteHost, setIsRemoteHost] = useState(() => {
+    if (typeof window !== "undefined") {
+      return !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    }
+    return false;
+  });
 
   useEffect(() => {
+    // Fetch current user info for countdown display
+    fetch("/api/auth/status")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.authenticated && data.user) {
+          setCurrentUser(data.user);
+        }
+      })
+      .catch(() => {});
+
     fetch("/api/settings")
       .then((res) => res.json())
       .then((data) => {
@@ -766,6 +779,49 @@ export default function ProfilePage() {
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-0">
       <div className="flex flex-col gap-6">
+        {/* Subscription Countdown */}
+        {currentUser && <CountdownBanner user={currentUser} />}
+
+        {/* Account Info Card */}
+        {currentUser && (
+          <Card>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="size-10 rounded-lg bg-blue-500/10 text-blue-500 flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-[20px]">person</span>
+              </div>
+              <div>
+                <h3 className="text-base sm:text-lg font-semibold">Account</h3>
+                <p className="text-sm text-text-muted">Your subscription status</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-3 rounded-lg bg-bg border border-border">
+                <p className="text-xs text-text-muted">Username</p>
+                <p className="font-medium">{currentUser.username}</p>
+              </div>
+              <div className="p-3 rounded-lg bg-bg border border-border">
+                <p className="text-xs text-text-muted">Role</p>
+                <p className="font-medium capitalize">{currentUser.role}</p>
+              </div>
+              <div className="p-3 rounded-lg bg-bg border border-border">
+                <p className="text-xs text-text-muted">Status</p>
+                <p className={`font-medium capitalize ${
+                  currentUser.status === "grace" ? "text-yellow-600" :
+                  currentUser.status === "expired" ? "text-red-600" : "text-green-600"
+                }`}>
+                  {currentUser.status}
+                </p>
+              </div>
+              <div className="p-3 rounded-lg bg-bg border border-border">
+                <p className="text-xs text-text-muted">Days Remaining</p>
+                <p className={`font-medium ${currentUser.daysRemaining <= 7 ? "text-red-600" : ""}`}>
+                  {currentUser.daysRemaining} days
+                </p>
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* Local Mode Info */}
         <Card>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">

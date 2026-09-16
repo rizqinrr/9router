@@ -46,6 +46,7 @@ function fmtNum(n) {
 export default function APIPageClient({ machineId }) {
   const [keys, setKeys] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [newKeyValidDays, setNewKeyValidDays] = useState("");
@@ -121,11 +122,12 @@ export default function APIPageClient({ machineId }) {
   const [visibleKeys, setVisibleKeys] = useState(new Set());
 
   // Client-side local/remote detection (UI hint only, not a security gate)
-  const [isRemoteHost, setIsRemoteHost] = useState(false);
-  useEffect(() => {
-    if (typeof window !== "undefined")
-      setIsRemoteHost(!["localhost", "127.0.0.1", "::1"].includes(window.location.hostname));
-  }, []);
+  const [isRemoteHost, setIsRemoteHost] = useState(() => {
+    if (typeof window !== "undefined") {
+      return !["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    }
+    return false;
+  });
 
   // Track app UI locale to gate wenyan caveman levels
   useEffect(() => {
@@ -426,10 +428,17 @@ export default function APIPageClient({ machineId }) {
 
   const fetchData = async () => {
     try {
-      const keysRes = await fetch("/api/keys");
+      const [keysRes, statusRes] = await Promise.all([
+        fetch("/api/keys"),
+        fetch("/api/auth/status"),
+      ]);
       const keysData = await keysRes.json();
+      const statusData = await statusRes.json();
       if (keysRes.ok) {
         setKeys(keysData.keys || []);
+      }
+      if (statusRes.ok && statusData.authenticated) {
+        setCurrentUser(statusData.user);
       }
     } catch (error) {
       console.log("Error fetching data:", error);
@@ -1167,7 +1176,12 @@ export default function APIPageClient({ machineId }) {
             </div>
             <p className="text-text-main font-medium mb-1">No API keys yet</p>
             <p className="text-sm text-text-muted mb-4">Create your first API key to get started</p>
-            <Button icon="add" onClick={() => setShowAddModal(true)}>
+            {currentUser && (
+              <p className="text-xs text-text-muted mb-4">
+                You can create up to 2 API keys ({keys.length}/2 used)
+              </p>
+            )}
+            <Button icon="add" onClick={() => setShowAddModal(true)} disabled={keys.length >= 2}>
               Create Key
             </Button>
           </div>
@@ -1439,6 +1453,13 @@ export default function APIPageClient({ machineId }) {
         }}
       >
         <div className="flex flex-col gap-4">
+          {currentUser && (
+            <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+              <p className="text-sm text-blue-600 dark:text-blue-400">
+                You can create up to 2 API keys. Currently using {keys.length} of 2 slots.
+              </p>
+            </div>
+          )}
           <Input
             label="Key Name"
             value={newKeyName}
@@ -1477,7 +1498,7 @@ export default function APIPageClient({ machineId }) {
             />
           </div>
           <div className="flex gap-2">
-            <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim()}>
+            <Button onClick={handleCreateKey} fullWidth disabled={!newKeyName.trim() || keys.length >= 2}>
               Create
             </Button>
             <Button
